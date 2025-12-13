@@ -1,127 +1,415 @@
-#keep for imports
+import os
 import numpy as np
-#------------------------------------------------------------------------------
-#read data into lists
-# norm_train = []
-# norm_test = []
-# pvc_train = []
-# pvc_test = []
-# with open("data/Normal_Train.txt") as file:
-#     for line in file:
-#         norm_train = line.strip().split('|')
-# with open("data/Normal_Test.txt") as file:
-#     for line in file:
-#         norm_test = line.strip().split('|')
-# with open("data/PVC_Train.txt") as file:
-#     for line in file:
-#         pvc_train = line.strip().split('|')
-# with open("data/PVC_Test.txt") as file:
-#     for line in file:
-#         pvc_test = line.strip().split('|')
-def read_sig_file(file_path):
-    with open(file_path, "r") as f:
-        data = f.read().strip().split("|")
+from scipy import signal
+from scipy.fftpack import dct
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+import matplotlib.pyplot as plt
+import tkinter as tk
+from tkinter import ttk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-    # cast to float
-    return [float(x) for x in data if x.strip() != ""]
+FS = 360
+LOWCUT = 0.5
+HIGHCUT = 40.0
+DCT_COEFFS = 20
+PLOT_DIR = "ecg_plots"
 
-normal_train=r"data/Normal_Train.txt"
-pvc_train=r"data/PVC_Train.txt"
-pvc_test=r"data/PVC_Test.txt"
-normal_test=r"data/Normal_Test.txt"
+FILES = {
+    "PVC_train": "data/PVC_Train.txt",
+    "PVC_test": "data/PVC_Test.txt",
+    "NORM_train": "data/Normal_Train.txt",
+    "NORM_test": "data/Normal_Test.txt"
+}
+############################################################################################
+def manual_butterworth(x, fs=360.0, f1=0.5, f2=40.0, order=4):
+    x = np.asarray(x, dtype=np.float64)
+    T = 1.0 / fs
 
-normal_train_sig=read_sig_file(normal_train)
-pvc_train_sig=read_sig_file(pvc_train)
-pvc_test_sig=read_sig_file(pvc_test)
-normal_test_sig=read_sig_file(normal_test)
-print(len(pvc_train_sig))
-#-----------------------------------------------------------------------------
+    omega1 = (2/T) * np.tan(np.pi * f1 / fs)
+    omega2 = (2/T) * np.tan(np.pi * f2 / fs)
 
-#design bandpass filter
-#get attenuation and transition band from where??????
-def choose_window(delta_s):
-    if delta_s <= 21:
-        return "rect", lambda n, N: np.ones(N)
-    elif delta_s <= 44:
-        return "hann", lambda n, N: 0.5 + 0.5 * np.cos(2*np.pi*n/(N-1))
-    elif delta_s <= 53:
-        return "hamming", lambda n, N: 0.54 + 0.46 * np.cos(2*np.pi*n/(N-1))
-    else:
-        return "blackman", lambda n, N: (
-            0.42 - 0.5*np.cos(2*np.pi*n/(N-1)) + 0.08*np.cos(4*np.pi*n/(N-1))
-        )
+    B = omega2 - omega1
+    omega0 = np.sqrt(omega1 * omega2)
 
-def estimate_N(delta_f, window_name):
-    if window_name == "rect":
-        N = int(np.ceil(0.9 / delta_f))
-    elif window_name == "hann":
-        N = int(np.ceil(3.1 / delta_f))
-    elif window_name == "hamming":
-        N = int(np.ceil(3.3 / delta_f))
-    else:
-        N = int(np.ceil(5.5 / delta_f))
+    lp_poles = []
+    for k in range(order):
+        theta = np.pi/2 + (2*k + 1) * np.pi / (2*order)
+        lp_poles.append(np.exp(1j * theta))
+    lp_poles = np.array(lp_poles)
 
-    if N % 2 == 0:
-        N += 1  
+    bp_poles = []
+    for p in lp_poles:
+        root = np.sqrt((B*p)**2 - 4*(omega0**2))
+        bp_poles.append((B*p + root) / 2)
+        bp_poles.append((B*p - root) / 2)
 
-    return N
-#constant???
-#fs = 360
-#f1 = 0.5
-#f2 = 40
-def bandpass_filter(f1, f2, fs, N):
-    mid = (N - 1) / 2
-    omega1 = 2*f1*np.pi
-    omega2 = 2*f2*np.pi
-    f1 = f1 / (fs/2)
-    f2 = f2 / (fs/2)
-    hd = np.zeros(N)
-    for i in range(N):
-        n = i - mid
-        if n == 0:
-            hd[i] = 2*(f2 - f1)
+    bp_poles = np.array(bp_poles)
+
+    bp_zeros = np.concatenate([
+        np.zeros(order),
+        np.full(order, np.inf)
+    ])
+
+    z_poles = (2/T + bp_poles) / (2/T - bp_poles)
+
+    z_zeros = []
+    for z in bp_zeros:
+        if np.isinf(z):
+            z_zeros.append(-1.0)
         else:
-            hd[i] = 2 * f2 * np.sin(omega2*n)/(omega2*n) - np.sin(omega1*n)/np.pi*n
-    return hd
+            z_zeros.append((2/T + z) / (2/T - z))
+    z_zeros = np.array(z_zeros)
 
-#apply the filter
-def convolve_signals(indices1: list[int], samples1: list[float], 
-                    indices2: list[int], samples2: list[float]) -> tuple[list[int], list[float]]:
+    b = np.real(np.poly(z_zeros))
+    a = np.real(np.poly(z_poles))
 
-    N1 = len(samples1)
-    N2 = len(samples2)
+    w0 = 2*np.pi * np.sqrt(f1*f2) / fs
+    ejw = np.exp(1j*w0*np.arange(len(b)))
+    H0 = np.sum(b * ejw) / np.sum(a * ejw)
+    b = b / np.abs(H0)
+
+    y = np.zeros_like(x)
+    for n in range(len(x)):
+        for k in range(len(b)):
+            if n - k >= 0:
+                y[n] += b[k] * x[n - k]
+        for k in range(1, len(a)):
+            if n - k >= 0:
+                y[n] -= a[k] * y[n - k]
+        y[n] /= a[0]
+
+    return y
+#################################################################################
+
+def load_txt_signal(path):
+    """Load a text ECG file that contains numbers separated by |, \n or whitespace."""
+    with open(path, 'r', encoding="utf-8", errors="ignore") as f:
+        raw = f.read()
+    raw = raw.replace('\n', '|').replace(',', '|')
+    parts = [p.strip() for p in raw.split('|') if p.strip() != ""]
+    arr = np.array([float(x) for x in parts], dtype=np.float64)
+    return arr
+
+def bandpass_filter(x, fs=FS, low=LOWCUT, high=HIGHCUT, order=4):
+    nyq = 0.5 * fs
+    b, a = signal.butter(order, [low / nyq, high / nyq], btype="band")
+    return signal.filtfilt(b, a, x)
+
+def normalize(x):
+    xm = x - np.mean(x)
+    s = np.std(xm)
+    if s < 1e-8:
+        return xm
+    return xm / s
+
+def detect_r_peaks(ecg, fs=FS):
+    """Lightweight R-peak detector."""
+    diff = np.diff(ecg, prepend=ecg[0])
+    squared = diff ** 2
+    win = int(0.12 * fs)
+    if win < 1:
+        win = 1
+    ma = np.convolve(squared, np.ones(win) / win, mode='same')
+    thresh = np.median(ma) * 4.0 + 1e-8
+    min_distance = int(0.25 * fs)
+    peaks, _ = signal.find_peaks(ma, distance=min_distance, height=thresh)
+    return peaks
+
+def extract_beats(record, peaks, fs=FS, pre_ms=200, post_ms=400):
+    pre = int(pre_ms * fs / 1000)
+    post = int(post_ms * fs / 1000)
+    beats = []
+    for p in peaks:
+        start = p - pre
+        end = p + post
+        if start >= 0 and end <= len(record):
+            beats.append(record[start:end])
+    return beats
+
+def autocorr_features(beat, nlags=200):
+    x = beat - np.mean(beat)
+    ac = np.correlate(x, x, mode='full')
+    mid = len(ac) // 2
+    end = min(mid + nlags, len(ac))
+    pos = ac[mid:end]
+    if np.max(np.abs(pos)) > 0:
+        pos = pos / np.max(np.abs(pos))
+    c = dct(pos, norm='ortho')
+    if len(c) < DCT_COEFFS:
+        c = np.pad(c, (0, DCT_COEFFS - len(c)))
+    return c[:DCT_COEFFS]
+
+def save_example_plots(raw, filtered, beat, tag):
+    os.makedirs(PLOT_DIR, exist_ok=True)
+
+    safe_tag = os.path.basename(tag).replace(".", "_").replace("|", "_")
+
+    fig, axs = plt.subplots(3, 1, figsize=(8, 8))
+    t_raw = np.arange(len(raw)) / FS
+    t_f = np.arange(len(filtered)) / FS
+
+    axs[0].plot(t_raw, raw)
+    axs[0].set_title("Raw signal")
+
+    axs[1].plot(t_f, filtered)
+    axs[1].set_title("Filtered (0.5–40 Hz Butterworth)")
+
+    axs[2].plot(beat)
+    axs[2].set_title("Beat segment")
+
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/{safe_tag}_waveforms.png")
+    plt.close(fig)
+
+    ac = np.correlate(beat - np.mean(beat), beat - np.mean(beat), mode='full')
+    mid = len(ac) // 2
+    pos = ac[mid:mid + 200]
+    d = dct(pos, norm='ortho')
+
+    fig2, ax2 = plt.subplots(2, 1, figsize=(6, 6))
+    ax2[0].plot(pos)
+    ax2[0].set_title("Autocorrelation")
+
+    ax2[1].stem(np.arange(len(d))[:DCT_COEFFS], d[:DCT_COEFFS])
+    ax2[1].set_title("DCT (first coefficients)")
+
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/{safe_tag}_ac_dct.png")
+    plt.close(fig2)
+
+def process_file(path, label, use_manual=False):
+    raw = load_txt_signal(path)
+    print(f"Loaded '{path}', {len(raw)} samples")
+
+    if use_manual:
+        filtered = manual_butterworth(raw)
+    else:
+        filtered = bandpass_filter(raw)
+
+
+    features = []
+    labels = []
+
+    if len(filtered) < 5 * FS:
+        beat = normalize(filtered)
+        features.append(autocorr_features(beat))
+        labels.append(label)
+        save_example_plots(raw, filtered, beat, path)
+        return np.array(features), np.array(labels)
+
+    peaks = detect_r_peaks(filtered)
+    print(f"Detected {len(peaks)} R-peaks in {os.path.basename(path)}")
+
+    beats = extract_beats(filtered, peaks)
+    if len(beats) == 0:
+        w = int(0.6 * FS)
+        beats = [filtered[i:i + w] for i in range(0, len(filtered) - w, w)]
+        print(f"Fallback segmentation: {len(beats)} beats")
+
+    for i, b in enumerate(beats):
+        b_norm = normalize(b)
+        features.append(autocorr_features(b_norm))
+        labels.append(label)
+        if i < 2:
+            save_example_plots(raw, filtered, b, f"{path}_beat{i}")
+
+    return np.array(features), np.array(labels)
+
+def build_dataset(files, use_manual=False):
+    X_train = []
+    y_train = []
+    X_test = []
+    y_test = []
+
+    for f, lab in [(files["PVC_train"], 1), (files["NORM_train"], 0)]:
+        feats, labs = process_file(f, lab, use_manual)
+        X_train.append(feats)
+        y_train.append(labs)
+
+    for f, lab in [(files["PVC_test"], 1), (files["NORM_test"], 0)]:
+        feats, labs = process_file(f, lab, use_manual)
+        X_test.append(feats)
+        y_test.append(labs)
+
+    X_train = np.vstack(X_train)
+    y_train = np.hstack(y_train)
+    X_test = np.vstack(X_test)
+    y_test = np.hstack(y_test)
+
+    print(f"Train set: {X_train.shape}, Test set: {X_test.shape}")
+    return X_train, y_train, X_test, y_test
+
+def train_and_evaluate(X_train, y_train, X_test, y_test):
+    clf = KNeighborsClassifier(n_neighbors=13)
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+
+    acc = accuracy_score(y_test, y_pred)
+    cm = confusion_matrix(y_test, y_pred)
+    rep = classification_report(y_test, y_pred, target_names=["Normal", "PVC"])
+
+    print("Accuracy:", acc)
+    print("Confusion Matrix:\n", cm)
+    print(rep)
+
+    with open("results_summary.txt", "w") as f:
+        f.write(f"Accuracy: {acc}\n")
+        f.write("Confusion Matrix:\n")
+        f.write(str(cm) + "\n\n")
+        f.write(rep)
+
+    return clf
+
+def main():
+    for k, v in FILES.items():
+        if not os.path.exists(v):
+            raise FileNotFoundError(f"Expected file '{v}' not found.")
+
+    choice = input("manual or built in? [m/b]: ").lower()
+    use_manual = (choice == "m")
     
-    if N1 == 0 or N2 == 0:
-        return [], []
-    
-    output_length = N1 + N2 - 1
-    
-
-    start_idx = int(indices1[0] + indices2[0])
-    end_idx = int(indices1[-1] + indices2[-1])
-    
-    result_samples = [0.0] * output_length
-    result_indices = list(range(start_idx, end_idx + 1))
-    
-    for n in range(output_length):
-        for k in range(N1):
-            if 0 <= n - k < N2:
-                result_samples[n] += samples1[k] * samples2[n - k]
-    
-    return result_indices, result_samples
-
-def apply_filter_no_specs():
-    #drop box to choose from the 4 windows
-    #text box to manually add N
-    if N % 2 == 0:
-        N += 1 
-    bandpass_filter('''use constant frequencies''')
-    convolve_signals('''indices1 = indices norm_train''', norm_train, '''indices2 dont know''', )
+    X_train, y_train, X_test, y_test = build_dataset(FILES, use_manual)
+    train_and_evaluate(X_train, y_train, X_test, y_test)
+    print("Done! Plots saved in ecg_plots/ and results saved in results_summary.txt")
 
 
+# ============================================================
+def plot_confusion_matrix(cm, class_names, title):
+    fig, ax = plt.subplots(figsize=(4, 4))
+    im = ax.imshow(cm)
+
+    ax.set_xticks(np.arange(len(class_names)))
+    ax.set_yticks(np.arange(len(class_names)))
+    ax.set_xticklabels(class_names)
+    ax.set_yticklabels(class_names)
+
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    ax.set_title(title)
+
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, cm[i, j],
+                    ha="center", va="center", color="white" if cm[i, j] > cm.max()/2 else "black")
+
+    plt.tight_layout()
+    return fig
+
+def evaluate_model(use_manual):
+    X_train, y_train, X_test, y_test = build_dataset(FILES, use_manual)
+
+    clf = KNeighborsClassifier(n_neighbors=13)
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+
+    cm = confusion_matrix(y_test, y_pred)
+    acc = accuracy_score(y_test, y_pred)
+
+    return cm, acc
+
+def plot_ecg_comparison(signal, title):
+    raw = signal
+    built_in = bandpass_filter(raw)
+    manual = manual_butterworth(raw)
+
+    t = np.arange(len(raw)) / FS
+
+    fig, axs = plt.subplots(4, 1, figsize=(9, 8), sharex=True)
+
+    axs[0].plot(t, raw)
+    axs[0].set_title("Raw ECG")
+
+    axs[1].plot(t, built_in)
+    axs[1].set_title("Built-in Butterworth (0.5–40 Hz)")
+
+    axs[2].plot(t, manual)
+    axs[2].set_title("Manual Butterworth (0.5–40 Hz)")
+
+    peaks = detect_r_peaks(built_in)
+    beats = extract_beats(built_in, peaks)
+
+    if len(beats) > 0:
+        beat = normalize(beats[0])
+        ac = np.correlate(beat - np.mean(beat), beat - np.mean(beat), mode="full")
+        mid = len(ac) // 2
+        axs[3].plot(ac[mid:mid+200])
+        axs[3].set_title("Autocorrelation (first beat)")
+    else:
+        axs[3].text(0.5, 0.5, "No beats detected", ha="center")
+
+    fig.suptitle(title)
+    plt.tight_layout()
+    return fig
 
 
-def apply_filter():
-    delta_f, delta_s = input("enter transition band and stop band attenution: ")
-    if(delta_f == '' and delta_s == ''):
-        pass
+def launch_gui():
+    root = tk.Tk()
+    root.title("ECG Filter Comparison (Manual vs Built-in)")
+    root.geometry("1000x800")
+
+    frame = ttk.Frame(root)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    canvas_frame = ttk.Frame(frame)
+    canvas_frame.pack(fill=tk.BOTH, expand=True)
+
+    def clear_canvas():
+        for widget in canvas_frame.winfo_children():
+            widget.destroy()
+
+    use_manual = tk.BooleanVar(value=False)
+
+    def show_confusion():
+        clear_canvas()
+        cm, acc = evaluate_model(use_manual.get())
+        title = f"Confusion Matrix (Accuracy = {acc:.2f})"
+        fig = plot_confusion_matrix(cm, ["Normal", "PVC"], title)
+
+        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def show_normal():
+        clear_canvas()
+        sig = load_txt_signal(FILES["NORM_train"])
+        fig = plot_ecg_comparison(sig, "Normal Train Signal")
+        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def show_pvc():
+        clear_canvas()
+        sig = load_txt_signal(FILES["PVC_train"])
+        fig = plot_ecg_comparison(sig, "PVC Train Signal")
+        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    btn_frame = ttk.Frame(frame)
+    btn_frame.pack(pady=10)
+
+    ttk.Button(btn_frame, text="Plot Normal Train", command=show_normal).pack(side=tk.LEFT, padx=10)
+    ttk.Button(btn_frame, text="Plot PVC Train", command=show_pvc).pack(side=tk.LEFT, padx=10)
+
+    ttk.Checkbutton(
+        btn_frame,
+        text="Use Manual Butterworth",
+        variable=use_manual
+    ).pack(side=tk.LEFT, padx=10)
+
+    ttk.Button(
+        btn_frame,
+        text="Show Confusion Matrix",
+        command=show_confusion
+    ).pack(side=tk.LEFT, padx=10)
+
+    ttk.Button(btn_frame, text="Quit", command=root.destroy).pack(side=tk.LEFT, padx=10)
+
+    root.mainloop()
+# ============================================================
+
+
+if __name__ == "__main__":
+    launch_gui()
+    #main()
