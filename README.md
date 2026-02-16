@@ -1,6 +1,6 @@
 # ECG Normal vs PVC Classifier
 
-A Python-based project for **automatic classification of ECG signals** into **Normal** and **Premature Ventricular Contraction (PVC)** beats using **digital signal processing and machine learning**.
+A Python-based project as a grading criteria for DSP (Digital Signal Processing) course I studied in my 4th semester of ASU computer science (scientific computing department) used for **automatic classification of ECG signals** into **Normal** and **Premature Ventricular Contraction (PVC)** beats using **digital signal processing and machine learning**.
 
 This project focuses on *signal-level understanding* rather than end-to-end deep learning, combining classical DSP techniques with interpretable feature extraction and classification.
 
