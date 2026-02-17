@@ -68,6 +68,10 @@ The Tkinter-based GUI allows you to:
 - Display **confusion matrix and accuracy**
 - Toggle filtering method interactively
 
+<img width="1366" height="768" alt="Screenshot from 2026-02-17 12-03-23" src="https://github.com/user-attachments/assets/14fde27d-381c-44f4-ad0a-5a574fad69dd" />
+
+<img width="1366" height="768" alt="Screenshot from 2026-02-17 12-05-55" src="https://github.com/user-attachments/assets/d6b2e5ee-f48d-41ec-82d3-762ff44d998d" />
+
 ---
 
 ## Project Structure
@@ -136,3 +140,10 @@ Detailed classification report
 Saved plots in ```ecg_plots/```
 
 Summary written to ```results_summary.txt```
+
+<img width="1366" height="768" alt="Screenshot from 2026-02-17 12-05-34" src="https://github.com/user-attachments/assets/711d9ccd-6d73-445a-8628-a07a4bd40180" />
+
+<img width="1366" height="768" alt="Screenshot from 2026-02-17 12-03-37" src="https://github.com/user-attachments/assets/8d1b8ab9-3c98-4404-80e6-631c7e185940" />
+
+<img width="1366" height="768" alt="Screenshot from 2026-02-17 12-03-58" src="https://github.com/user-attachments/assets/5dc63f75-6006-490c-9b4b-1c8a1aaa4a94" />
+
